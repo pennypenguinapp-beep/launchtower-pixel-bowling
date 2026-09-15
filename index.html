@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Pixel Bowling</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#2d333b;
+    --text:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --good:#3fb950; --bad:#f85149; --gold:#e3b341;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;
+    display:flex;flex-direction:column;align-items:center;
+    min-height:100vh;overflow-x:hidden;
+  }
+  header{width:100%;max-width:760px;padding:14px 16px 6px;text-align:center}
+  h1{font-size:20px;letter-spacing:3px;color:var(--accent);text-transform:uppercase}
+  h1 span{color:var(--gold)}
+  .sub{font-size:11px;color:var(--dim);margin-top:4px;letter-spacing:1px}
+  #wrap{width:100%;max-width:760px;padding:8px 12px 4px;display:flex;justify-content:center}
+  canvas{
+    width:100%;max-width:720px;height:auto;display:block;
+    background:#0a0e14;border:1px solid var(--line);border-radius:8px;
+    touch-action:none;image-rendering:pixelated;
+  }
+  #hud{
+    width:100%;max-width:760px;display:flex;justify-content:space-between;
+    align-items:center;padding:6px 16px;font-size:12px;color:var(--dim);
+  }
+  #hud b{color:var(--text)}
+  #msg{
+    width:100%;max-width:760px;text-align:center;font-size:13px;
+    min-height:20px;padding:2px 12px;letter-spacing:1px;
+  }
+  #msg.strike{color:var(--gold);font-weight:bold}
+  #msg.spare{color:var(--good);font-weight:bold}
+  #msg.miss{color:var(--bad)}
+  #controls{
+    width:100%;max-width:760px;display:flex;gap:10px;justify-content:center;
+    padding:8px 12px 4px;flex-wrap:wrap;
+  }
+  button{
+    background:var(--panel);color:var(--text);border:1px solid var(--line);
+    font-family:inherit;font-size:12px;letter-spacing:1px;padding:9px 18px;
+    border-radius:6px;cursor:pointer;text-transform:uppercase;
+  }
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button:active{transform:translateY(1px)}
+  button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  button.primary:hover{background:#388bfd;color:#fff}
+  footer{
+    width:100%;text-align:center;padding:14px 12px 22px;font-size:11px;color:var(--dim);
+  }
+  footer a{color:var(--accent);text-decoration:none}
+  footer a:hover{text-decoration:underline}
+  @media (max-width:480px){
+    h1{font-size:16px}
+    button{padding:8px 14px;font-size:11px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pixel <span>Bowling</span></h1>
+  <div class="sub">10 frames &middot; timing meter aim &amp; spin &middot; pin physics</div>
+</header>
+<div id="hud">
+  <div>Frame <b id="frameNum">1</b>/10</div>
+  <div>Ball <b id="ballNum">1</b></div>
+  <div>Score <b id="scoreNum">0</b></div>
+  <div>Best <b id="bestNum">0</b></div>
+</div>
+<div id="msg">Set your aim, then throw.</div>
+<div id="wrap"><canvas id="cv" width="720" height="900"></canvas></div>
+<div id="controls">
+  <button id="btnAim">Aim</button>
+  <button id="btnSpin">Spin</button>
+  <button id="btnThrow" class="primary">Throw</button>
+  <button id="btnReset">Reset</button>
+</div>
+<footer>
+  Made by <a href="https://pennypenguinapp-beep.github.io/" target="_blank" rel="noopener">LaunchTower</a> &middot; free browser tools for pixel artists &amp; game devs
+</footer>
+<script>
+(function(){
+"use strict";
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const W=cv.width,H=cv.height;
+const LANE_L=150,LANE_R=570,LANE_W=LANE_R-LANE_L;
+const PIN_Y0=150;           // head pin (closest to bowler)
+const PIN_GAP=52;           // vertical gap between rows
+const PIN_SPREAD=46;        // horizontal gap between pins in a row
+const BALL_R=16;
+const PIN_R=11;
+const BALL_START_Y=H-90;
+const BALL_SPEED=11;
+const PIN_HIT_SPEED=3.2;    // max speed a knocked pin can travel
+const FRICTION=0.985;
+const PIN_FRICTION=0.94;
+const PIN_PIN_E=0.55;       // pin-pin restitution
+const BALL_PIN_E=0.7;       // ball-pin restitution
+const LANE_E=0.35;          // lane wall restitution
+const SWEET=0.5;            // sweet spot on meter
+const SWEET_W=0.06;         // half-width of sweet zone
+const GOOD_W=0.16;          // half-width of good zone
+const METER_SPEED=2.6;      // rad/s sweep speed
+
+const PIN_POS=[
+  [0,0],[ -1,1],[1,1],[0,2],[-1,2],[1,2],[-2,3],[0,3],[2,3],[-1,4],[1,4]
+]; // [col,row] col in units of PIN_SPREAD, row in units of PIN_GAP
+
+let pins=[],ball=null,state='aim'; // aim|spin|rolling|settling|frameEnd|gameOver
+let frame=0,ballInFrame=0,framePinsDown=0;
+let score=0,best=0;
+let frames=[]; // array of arrays of pins knocked per throw
+let meterVal=0,meterDir=1,meterActive=false;
+let aimAngle=0,spinVal=0;
+let msgEl=document.getElementById('msg');
+let settleTimer=0;
+let particles=[];
+let shake=0;
+
+try{best=parseInt(localStorage.getItem('pixelBowlingBest')||'0',10)||0;}catch(e){best=0;}
+
+function pinBasePos(i){
+  const [c,r]=PIN_POS[i];
+  return {x:360+c*PIN_SPREAD, y:PIN_Y0+r*PIN_GAP};
+}
+function resetPins(){
+  pins=[];
+  for(let i=0;i<10;i++){
+    const p=pinBasePos(i);
+    pins.push({x:p.x,y:p.y,vx:0,vy:0,down:false,rot:0,vr:0,settled:false});
+  }
+}
+function newBall(){
+  ball={x:360,y:BALL_START_Y,vx:0,vy:0,active:false,spin:0};
+}
+function resetGame(){
+  frame=0;ballInFrame=0;framePinsDown=0;score=0;
+  frames=[];
+  resetPins();newBall();
+  state='aim';meterVal=0;meterDir=1;meterActive=false;
+  aimAngle=0;spinVal=0;
+  particles=[];
+  setMsg('Set your aim, then throw.','');
+  updateHUD();
+}
+function setMsg(t,cls){msgEl.textContent=t;msgEl.className=cls||'';}
+function updateHUD(){
+  document.getElementById('frameNum').textContent=Math.min(frame+1,10);
+  document.getElementById('ballNum').textContent=(ballInFrame+1);
+  document.getElementById('scoreNum').textContent=score;
+  document.getElementById('bestNum').textContent=best;
+}
+function remainingPins(){return pins.filter(p=>!p.down).length;}
+
+function meterScore(v){
+  const d=Math.abs(v-SWEET);
+  if(d<=SWEET_W)return 1;
+  if(d<=GOOD_W)return 1-(d-SWEET_W)/(GOOD_W-SWEET_W)*0.55;
+  return Math.max(0.15,0.45-(d-GOOD_W)*0.8);
+}
+
+function doThrow(){
+  if(state!=='aim'&&state!=='spin')return;
+  const s=meterScore(meterVal);
+  // map meter to angle: perfect = straight (0), off = angled
+  const maxAng=0.55;
+  const err=(meterVal-SWEET)*2; // -1..1
+  aimAngle=err*maxAng*(1.15-s*0.55);
+  spinVal=(Math.random()*2-1)*0.9*(1-s*0.6);
+  ball.active=true;
+  ball.vx=Math.sin(aimAngle)*BALL_SPEED;
+  ball.vy=-Math.cos(aimAngle)*BALL_SPEED;
+  ball.spin=spinVal;
+  state='rolling';
+  meterActive=false;
+  setMsg('Rolling...','');
+  shake=4;
+}
+
+function startMeter(){
+  meterVal=0;meterDir=1;meterActive=true;
+}
+
+function physicsStep(){
+  if(ball.active){
+    // spin curves the ball
+    ball.vx+=ball.spin*0.06;
+    ball.spin*=0.995;
+    ball.x+=ball.vx;ball.y+=ball.vy;
+    // lane walls
+    if(ball.x-BALL_R<LANE_L){ball.x=LANE_L+BALL_R;ball.vx*=-LANE_E;}
+    if(ball.x+BALL_R>LANE_R){ball.x=LANE_R-BALL_R;ball.vx*=-LANE_E;}
+    // ball-pin collisions
+    for(const p of pins){
+      if(p.down)continue;
+      const dx=p.x-ball.x,dy=p.y-ball.y;
+      const d=Math.hypot(dx,dy);
+      const minD=BALL_R+PIN_R;
+      if(d<minD&&d>0.0001){
+        const nx=dx/d,ny=dy/d;
+        const overlap=minD-d;
+        p.x+=nx*overlap*0.8;p.y+=ny*overlap*0.8;
+        // impulse
+        const relVx=p.vx-ball.vx,relVy=p.vy-ball.vy;
+        const relN=relVx*nx+relVy*ny;
+        if(relN<0){
+          const j=-(1+BALL_PIN_E)*relN;
+          p.vx+=j*nx;p.vy+=j*ny;
+          ball.vx-=j*nx*0.25;ball.vy-=j*ny*0.25;
+          p.down=true;
+          p.vr=(Math.random()*2-1)*0.3;
+          spawnBurst(p.x,p.y,'#e6edf3');
+          shake=Math.max(shake,3);
+        }
+      }
+    }
+    // ball off bottom of screen (past pins toward bowler? no, ball goes up)
+    if(ball.y<-40){ball.active=false;}
+  }
+  // pin-pin collisions + pin motion
+  for(const p of pins){
+    if(!p.down)continue;
+    p.x+=p.vx;p.y+=p.vy;
+    p.vx*=PIN_FRICTION;p.vy*=PIN_FRICTION;
+    p.rot+=p.vr;p.vr*=0.96;
+    // lane walls for pins
+    if(p.x-PIN_R<LANE_L){p.x=LANE_L+PIN_R;p.vx*=-LANE_E;}
+    if(p.x+PIN_R>LANE_R){p.x=LANE_R-PIN_R;p.vx*=-LANE_E;}
+    if(p.y-PIN_R<60){p.y=60+PIN_R;p.vy*=-LANE_E;}
+    if(p.y+PIN_R>H-40){p.y=H-40-PIN_R;p.vy*=-LANE_E;}
+    const sp=Math.hypot(p.vx,p.vy);
+    if(sp<0.05){p.vx=0;p.vy=0;p.settled=true;}
+  }
+  // pin-pin
+  for(let i=0;i<pins.length;i++){
+    const a=pins[i];if(!a.down)continue;
+    for(let j=i+1;j<pins.length;j++){
+      const b=pins[j];if(!b.down)continue;
+      const dx=b.x-a.x,dy=b.y-a.y;
+      const d=Math.hypot(dx,dy);
+      const minD=PIN_R*2;
+      if(d<minD&&d>0.0001){
+        const nx=dx/d,ny=dy/d;
+        const overlap=(minD-d)/2;
+        a.x-=nx*overlap;a.y-=ny*overlap;
+        b.x+=nx*overlap;b.y+=ny*overlap;
+        const relVx=b.vx-a.vx,relVy=b.vy-a.vy;
+        const relN=relVx*nx+relVy*ny;
+        if(relN<0){
+          const jimp=-(1+PIN_PIN_E)*relN/2;
+          a.vx-=jimp*nx;a.vy-=jimp*ny;
+          b.vx+=jimp*nx;b.vy+=jimp*ny;
+          a.down=true;b.down=true;
+          a.vr+=(Math.random()*2-1)*0.15;
+          b.vr+=(Math.random()*2-1)*0.15;
+        }
+      }
+    }
+  }
+  // particles
+  for(const pt of particles){
+    pt.x+=pt.vx;pt.y+=pt.vy;pt.vy+=0.12;pt.life--;
+  }
+  particles=particles.filter(p=>p.life>0);
+  if(shake>0)shake*=0.85;
+}
+
+function spawnBurst(x,y,col){
+  for(let i=0;i<8;i++){
+    const a=Math.random()*Math.PI*2,s=1+Math.random()*3;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1,life:18+Math.random()*10,col});
+  }
+}
+
+function allSettled(){
+  if(ball.active)return false;
+  for(const p of pins)if(p.down&&!p.settled)return false;
+  return true;
+}
+
+function computeScore(){
+  // frames is array of arrays: each throw's pins knocked
+  let total=0;
+  let fi=0;
+  const throws=frames;
+  let idx=0;
+  for(let f=0;f<10;f++){
+    if(idx>=throws.length)break;
+    if(f<9){
+      const t1=throws[idx];
+      if(t1===10){
+        // strike: next 2 throws
+        let bonus=0;
+        if(idx+1<throws.length)bonus+=throws[idx+1];
+        if(idx+2<throws.length)bonus+=throws[idx+2];
+        total+=10+bonus;
+        idx+=1;
+      }else{
+        const t2=throws[idx+1]||0;
+        if(t1+t2===10){
+          // spare: next 1 throw
+          let bonus=0;
+          if(idx+2<throws.length)bonus+=throws[idx+2];
+          total+=10+bonus;
+        }else{
+          total+=t1+t2;
+        }
+        idx+=2;
+      }
+    }else{
+      // 10th frame
+      const t1=throws[idx];
+      if(t1===10){
+        total+=10;
+        // up to 2 bonus throws
+        if(idx+1<throws.length)total+=throws[idx+1];
+        if(idx+2<throws.length)total+=throws[idx+2];
+      }else{
+        const t2=throws[idx+1]||0;
+        total+=t1+t2;
+        if(t1+t2===10){
+          if(idx+2<throws.length)total+=throws[idx+2];
+        }
+      }
+    }
+  }
+  return total;
+}
+
+function endThrow(){
+  const knocked=framePinsDown;
+  frames.push(knocked);
+  framePinsDown=0;
+  const rem=remainingPins();
+  const isTenth=(frame===9);
+  let done=false;
+  if(rem===0){
+    if(!isTenth){
+      // frame complete
+      if(knocked===10)setMsg('STRIKE!','strike');
+      else setMsg('SPARE!','spare');
+      frame++;ballInFrame=0;
+      if(frame>=10){done=true;}
+      else{resetPins();newBall();state='aim';}
+    }else{
+      // 10th frame: if strike, get bonus balls
+      if(knocked===10){
+        setMsg('STRIKE! Bonus ball!','strike');
+        // reset pins for bonus
+        resetPins();newBall();state='aim';
+        // track 10th frame bonus balls via ballInFrame
+        ballInFrame++;
+      }else{
+        setMsg('SPARE! Bonus ball!','spare');
+        resetPins();newBall();state='aim';
+        ballInFrame++;
+      }
+      // 10th frame ends after: strike+strike, strike+spare, or spare, or 2 balls with no strike/spare
+      const tenthThrows=frames.length;
+      // count throws in 10th frame
+      let tenthCount=0;
+      // simpler: track via a counter
+      if(tenthBonusDone())done=true;
+    }
+  }else{
+    if(!isTenth){
+      // 2nd ball
+      ballInFrame=1;
+      newBall();state='aim';
+      setMsg('Spare attempt...','');
+    }else{
+      // 10th frame 2nd ball, no strike on 1st
+      ballInFrame=1;
+      newBall();state='aim';
+      setMsg('10th frame, ball 2','');
+      // check if done after this
+    }
+  }
+  score=computeScore();
+  if(score>best){
+    best=score;
+    try{localStorage.setItem('pixelBowlingBest',String(best));}catch(e){}
+  }
+  updateHUD();
+  if(done){
+    state='gameOver';
+    setMsg('Game over! Score: '+score+(score>=200?' — Amazing!':score>=150?' — Great!':score>=100?' — Nice!':''),'strike');
+  }
+}
+
+let tenthBallCount=0;
+function tenthBonusDone(){
+  // 10th frame rules:
+  // If 1st ball strike: 2 more balls (reset pins each time)
+  // If 1st+2nd = spare: 1 more ball
+  // Otherwise: done after 2 balls
+  // We track via frames array length in 10th frame
+  // Simple heuristic: count throws since frame 9 started
+  // Use a dedicated counter
+  return false; // handled below
+}
+
+// Better 10th frame tracking
+let tenthState='open'; // 'open'|'strike1'|'spare1'|'strike2'|'done'
+function handleTenth(knocked,rem){
+  if(tenthState==='open'){
+    if(knocked===10){tenthState='strike1';return false;}
+    // else wait for 2nd ball
+    return false;
+  }
+  if(tenthState==='strike1'){
+    // 2nd ball of 10th (after strike)
+    if(knocked===10){tenthState='strike2';return false;}
+    // if not strike, 3rd ball
+    tenthState='strike2';
+    return false;
+  }
+  if(tenthState==='strike2'){
+    // 3rd ball done
+    return true;
+  }
+  // open: after 2nd ball
+  return true;
+}
+
+// Override endThrow with cleaner logic
+function endThrowClean(){
+  const knocked=framePinsDown;
+  frames.push(knocked);
+  framePinsDown=0;
+  const rem=remainingPins();
+  const isTenth=(frame===9);
+
+  if(isTenth){
+    // 10th frame logic
+    const tenthThrows=frames.length; // total throws, but we need 10th frame specific
+    // Use tenthState
+    if(tenthState==='open'){
+      if(knocked===10){
+        tenthState='strike1';
+        setMsg('STRIKE! Bonus ball!','strike');
+        resetPins();newBall();state='aim';
+      }else if(rem===0){
+        // spare
+        tenthState='spare1';
+        setMsg('SPARE! Bonus ball!','spare');
+        resetPins();newBall();state='aim';
+      }else{
+        // open, 2nd ball
+        newBall();state='aim';
+        setMsg('10th frame, ball 2','');
+      }
+    }else if(tenthState==='strike1'){
+      // 2nd ball after strike
+      if(knocked===10){
+        tenthState='strike2';
+        setMsg('STRIKE! One more!','strike');
+        resetPins();newBall();state='aim';
+      }else if(rem===0){
+        // spare after strike
+        tenthState='strike2';
+        setMsg('SPARE! One more!','spare');
+        resetPins();newBall();state='aim';
+      }else{
+        // open 2nd ball after strike
+        newBall();state='aim';
+        setMsg('10th frame, ball 3','');
+      }
+    }else if(tenthState==='spare1'){
+      // bonus ball after spare
+      setMsg('Bonus ball!','');
+      // this was the last
+      endGame();
+      return;
+    }else if(tenthState==='strike2'){
+      // final ball
+      endGame();
+      return;
+    }
+  }else{
+    // frames 1-9
+    if(rem===0){
+      if(knocked===10)setMsg('STRIKE!','strike');
+      else setMsg('SPARE!','spare');
+      frame++;ballInFrame=0;
+      if(frame>=10){
+        endGame();
+        return;
+      }
+      resetPins();newBall();state='aim';
+    }else{
+      ballInFrame=1;
+      newBall();state='aim';
+      setMsg('Spare attempt...','');
+    }
+  }
+  score=computeScore();
+  if(score>best){
+    best=score;
+    try{localStorage.setItem('pixelBowlingBest',String(best));}catch(e){}
+  }
+  updateHUD();
+}
+
+function endGame(){
+  score=computeScore();
+  if(score>best){
+    best=score;
+    try{localStorage.setItem('pixelBowlingBest',String(best));}catch(e){}
+  }
+  state='gameOver';
+  setMsg('Game over! Score: '+score+(score>=200?' — Amazing!':score>=150?' — Great!':score>=100?' — Nice!':''),'strike');
+  updateHUD();
+}
+
+// Replace endThrow with endThrowClean
+function endThrow(){endThrowClean();}
+
+// --- Rendering ---
+function draw(){
+  ctx.save();
+  if(shake>0.5){
+    ctx.translate((Math.random()*2-1)*shake,(Math.random()*2-1)*shake);
+  }
+  // background
+  ctx.fillStyle='#0a0e14';
+  ctx.fillRect(-20,-20,W+40,H+40);
+  // lane
+  const lg=ctx.createLinearGradient(LANE_L,0,LANE_R,0);
+  lg.addColorStop(0,'#1a1208');
+  lg.addColorStop(0.5,'#2a1f10');
+  lg.addColorStop(1,'#1a1208');
+  ctx.fillStyle=lg;
+  ctx.fillRect(LANE_L,40,LANE_W,H-80);
+  // lane boards (vertical lines)
+  ctx.strokeStyle='rgba(255,255,255,0.04)';
+  ctx.lineWidth=1;
+  for(let x=LANE_L;x<=LANE_R;x+=30){
+    ctx.beginPath();ctx.moveTo(x,40);ctx.lineTo(x,H-40);ctx.stroke();
+  }
+  // gutters
+  ctx.fillStyle='#060a10';
+  ctx.fillRect(LANE_L-24,40,24,H-80);
+  ctx.fillRect(LANE_R,40,24,H-80);
+  // gutter lines
+  ctx.strokeStyle='#2d333b';ctx.lineWidth=2;
+  ctx.strokeRect(LANE_L-24,40,LANE_W+48,H-80);
+  // arrows on lane
+  ctx.fillStyle='rgba(88,166,255,0.15)';
+  for(let i=0;i<7;i++){
+    const ax=LANE_L+60+i*((LANE_W-120)/6);
+    const ay=H-220;
+    ctx.beginPath();
+    ctx.moveTo(ax,ay);ctx.lineTo(ax-6,ay+14);ctx.lineTo(ax+6,ay+14);
+    ctx.closePath();ctx.fill();
+  }
+  // foul line
+  ctx.strokeStyle='rgba(230,237,243,0.2)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(LANE_L,H-130);ctx.lineTo(LANE_R,H-130);ctx.stroke();
+  // pins
+  for(const p of pins){
+    drawPin(p);
+  }
+  // ball
+  if(ball){
+    drawBall();
+  }
+  // particles
+  for(const pt of particles){
+    ctx.globalAlpha=pt.life/28;
+    ctx.fillStyle=pt.col;
+    ctx.fillRect(pt.x-2,pt.y-2,4,4);
+  }
+  ctx.globalAlpha=1;
+  // meter
+  if(state==='aim'||state==='spin'){
+    drawMeter();
+  }
+  // aim guide
+  if(state==='aim'||state==='spin'){
+    drawAimGuide();
+  }
+  // game over overlay
+  if(state==='gameOver'){
+    ctx.fillStyle='rgba(13,17,23,0.7)';
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#e3b341';
+    ctx.font='bold 36px Courier New';
+    ctx.textAlign='center';
+    ctx.fillText('GAME OVER',W/2,H/2-40);
+    ctx.fillStyle='#e6edf3';
+    ctx.font='20px Courier New';
+    ctx.fillText('Score: '+score,W/2,H/2);
+    ctx.fillStyle='#8b949e';
+    ctx.font='14px Courier New';
+    ctx.fillText('Best: '+best,W/2,H/2+30);
+    ctx.fillText('Press Reset to play again',W/2,H/2+60);
+  }
+  ctx.restore();
+}
+
+function drawPin(p){
+  ctx.save();
+  ctx.translate(p.x,p.y);
+  ctx.rotate(p.rot);
+  if(p.down){
+    ctx.globalAlpha=0.5;
+  }
+  // pin body (classic bowling pin shape, pixel style)
+  ctx.fillStyle=p.down?'#8b949e':'#e6edf3';
+  // base
+  ctx.fillRect(-8,-4,16,10);
+  // middle
+  ctx.fillRect(-6,-12,12,8);
+  // neck
+  ctx.fillRect(-4,-16,8,4);
+  // head
+  ctx.beginPath();ctx.arc(0,-18,5,0,Math.PI*2);ctx.fill();
+  // red stripe
+  ctx.fillStyle=p.down?'#6e3030':'#f85149';
+  ctx.fillRect(-6,-10,12,3);
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+
+function drawBall(){
+  ctx.save();
+  ctx.translate(ball.x,ball.y);
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  ctx.beginPath();ctx.arc(2,3,BALL_R,0,Math.PI*2);ctx.fill();
+  // ball
+  const bg=ctx.createRadialGradient(-4,-4,2,0,0,BALL_R);
+  bg.addColorStop(0,'#58a6ff');
+  bg.addColorStop(1,'#1f6feb');
+  ctx.fillStyle=bg;
+  ctx.beginPath();ctx.arc(0,0,BALL_R,0,Math.PI*2);ctx.fill();
+  // finger holes
+  ctx.fillStyle='rgba(0,0,0,0.4)';
+  ctx.beginPath();ctx.arc(-4,-3,2.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(2,-5,2,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(-1,2,2,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+}
+
+function drawMeter(){
+  const mx=360,my=H-50,mw=200,mh=16;
+  // bg
+  ctx.fillStyle='#161b22';
+  ctx.fillRect(mx-mw/2,my-mh/2,mw,mh);
+  // zones
+  const zoneX=v=>mx-mw/2+v*mw;
+  // good zone
+  ctx.fillStyle='rgba(63,185,80,0.3)';
+  ctx.fillRect(zoneX(SWEET-GOOD_W),my-mh/2,GOOD_W*2*mw,mh);
+  // sweet zone
+  ctx.fillStyle='rgba(227,179,65,0.5)';
+  ctx.fillRect(zoneX(SWEET-SWEET_W),my-mh/2,SWEET_W*2*mw,mh);
+  // border
+  ctx.strokeStyle='#2d333b';ctx.lineWidth=1;
+  ctx.strokeRect(mx-mw/2,my-mh/2,mw,mh);
+  // marker
+  const px=zoneX(meterVal);
+  ctx.fillStyle='#e6edf3';
+  ctx.fillRect(px-2,my-mh/2-3,4,mh+6);
+  // label
+  ctx.fillStyle='#8b949e';
+  ctx.font='10px Courier New';
+  ctx.textAlign='center';
+  ctx.fillText(state==='aim'?'AIM':'SPIN',mx,my+mh/2+14);
+}
+
+function drawAimGuide(){
+  // show where ball will go based on current meter
+  const s=meterScore(meterVal);
+  const err=(meterVal-SWEET)*2;
+  const maxAng=0.55;
+  const ang=err*maxAng*(1.15-s*0.55);
+  ctx.save();
+  ctx.strokeStyle='rgba(88,166,255,0.25)';
+  ctx.lineWidth=2;
+  ctx.setLineDash([6,6]);
+  ctx.beginPath();
+  ctx.moveTo(360,BALL_START_Y);
+  const ex=360+Math.sin(ang)*400;
+  const ey=BALL_START_Y-Math.cos(ang)*400;
+  ctx.lineTo(ex,ey);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// --- Input ---
+function onAction(){
+  if(state==='aim'){
+    state='spin';
+    startMeter();
+    setMsg('Now set your spin...','');
+  }else if(state==='spin'){
+    doThrow();
+  }
+}
+function onThrow(){
+  if(state==='aim'){
+    // skip aim, use center
+    meterVal=SWEET;
+    state='spin';
+    startMeter();
+    setMsg('Now set your spin...','');
+  }else if(state==='spin'){
+    doThrow();
+  }
+}
+function onReset(){
+  tenthState='open';
+  resetGame();
+}
+
+document.getElementById('btnAim').addEventListener('click',onAction);
+document.getElementById('btnSpin').addEventListener('click',onAction);
+document.getElementById('btnThrow').addEventListener('click',onThrow);
+document.getElementById('btnReset').addEventListener('click',onReset);
+
+// keyboard
+document.addEventListener('keydown',(e)=>{
+  if(e.repeat)return;
+  if(e.key===' '||e.key==='Enter'){
+    e.preventDefault();
+    if(state==='aim')onAction();
+    else if(state==='spin')onThrow();
+    else if(state==='gameOver')onReset();
+  }else if(e.key==='r'||e.key==='R'){
+    onReset();
+  }
+});
+
+// touch / click on canvas
+cv.addEventListener('pointerdown',(e)=>{
+  e.preventDefault();
+  if(state==='aim')onAction();
+  else if(state==='spin')onThrow();
+  else if(state==='gameOver')onReset();
+});
+
+// --- Main loop ---
+let last=0;
+function loop(t){
+  const dt=Math.min((t-last)/1000,0.05);
+  last=t;
+  // meter
+  if(meterActive){
+    meterVal+=meterDir*METER_SPEED*dt;
+    if(meterVal>=1){meterVal=1;meterDir=-1;}
+    if(meterVal<=0){meterVal=0;meterDir=1;}
+  }
+  // physics
+  if(state==='rolling'){
+    physicsStep();
+    // count pins down this throw
+    const downCount=pins.filter(p=>p.down).length;
+    if(downCount>framePinsDown){
+      framePinsDown=downCount;
+    }
+    // check if ball done and pins settled
+    if(!ball.active){
+      settleTimer+=dt;
+      if(settleTimer>0.3&&allSettled()){
+        settleTimer=0;
+        endThrow();
+      }
+    }
+  }else if(state==='aim'||state==='spin'){
+    // let pins settle
+    physicsStep();
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+resetGame();
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
