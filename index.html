@@ -23,7 +23,7 @@
   .sub{font-size:11px;color:var(--dim);margin-top:4px;letter-spacing:1px}
   #wrap{width:100%;max-width:760px;padding:8px 12px 4px;display:flex;justify-content:center}
   canvas{
-    width:100%;max-width:720px;height:auto;display:block;
+    display:block;
     background:#0a0e14;border:1px solid var(--line);border-radius:8px;
     touch-action:none;image-rendering:pixelated;
   }
@@ -66,7 +66,7 @@
 <body>
 <header>
   <h1>Pixel <span>Bowling</span></h1>
-  <div class="sub">10 frames &middot; timing meter aim &amp; spin &middot; pin physics</div>
+  <div class="sub">10 frames &middot; timing meter aim &amp; spin &middot; pin physics &middot; tap or Space to play</div>
 </header>
 <div id="hud">
   <div>Frame <b id="frameNum">1</b>/10</div>
@@ -80,6 +80,7 @@
   <button id="btnAim">Aim</button>
   <button id="btnSpin">Spin</button>
   <button id="btnThrow" class="primary">Throw</button>
+  <button id="btnPause">Pause</button>
   <button id="btnReset">Reset</button>
 </div>
 <footer>
@@ -113,7 +114,8 @@ const PIN_POS=[
   [0,0],[ -1,1],[1,1],[0,2],[-1,2],[1,2],[-2,3],[0,3],[2,3],[-1,4],[1,4]
 ]; // [col,row] col in units of PIN_SPREAD, row in units of PIN_GAP
 
-let pins=[],ball=null,state='aim'; // aim|spin|rolling|settling|frameEnd|gameOver
+let pins=[],ball=null,state='start'; // start|aim|spin|rolling|settling|paused|gameOver
+let prevState='aim'; // state before pause
 let frame=0,ballInFrame=0,framePinsDown=0;
 let score=0,best=0;
 let frames=[]; // array of arrays of pins knocked per throw
@@ -123,8 +125,39 @@ let msgEl=document.getElementById('msg');
 let settleTimer=0;
 let particles=[];
 let shake=0;
+let hitSfxDone=false;
 
 try{best=parseInt(localStorage.getItem('pixelBowlingBest')||'0',10)||0;}catch(e){best=0;}
+
+// --- WebAudio sound cues (no audio files) ---
+let actx=null;
+function audio(){
+  if(!actx){
+    try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){actx=null;}
+  }
+  if(actx&&actx.state==='suspended')actx.resume();
+  return actx;
+}
+function tone(freq,dur,type,vol,delay){
+  const a=audio();if(!a)return;
+  const t0=a.currentTime+(delay||0);
+  const o=a.createOscillator(),g=a.createGain();
+  o.type=type||'square';o.frequency.value=freq;
+  g.gain.setValueAtTime(vol||0.06,t0);
+  g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+  o.connect(g);g.connect(a.destination);
+  o.start(t0);o.stop(t0+dur);
+}
+function sfx(kind){
+  try{
+    if(kind==='hit'){tone(220,0.08,'square',0.07);tone(160,0.1,'triangle',0.05,0.02);}
+    else if(kind==='strike'){tone(440,0.1,'square',0.07);tone(660,0.12,'square',0.06,0.09);tone(880,0.16,'square',0.05,0.18);}
+    else if(kind==='spare'){tone(520,0.1,'square',0.06);tone(780,0.14,'square',0.05,0.1);}
+    else if(kind==='throw'){tone(120,0.15,'sawtooth',0.04);}
+    else if(kind==='start'){tone(330,0.08,'square',0.05);tone(495,0.1,'square',0.05,0.08);}
+    else if(kind==='over'){tone(392,0.15,'square',0.06);tone(523,0.15,'square',0.06,0.15);tone(659,0.25,'square',0.06,0.3);}
+  }catch(e){}
+}
 
 function pinBasePos(i){
   const [c,r]=PIN_POS[i];
@@ -147,8 +180,24 @@ function resetGame(){
   state='aim';meterVal=0;meterDir=1;meterActive=false;
   aimAngle=0;spinVal=0;
   particles=[];
+  state='aim';
   setMsg('Set your aim, then throw.','');
   updateHUD();
+}
+function startGame(){
+  tenthState='open';
+  resetGame();
+  sfx('start');
+}
+function togglePause(){
+  if(state==='paused'){
+    state=prevState;
+    setMsg('Resumed.','');
+  }else if(state==='aim'||state==='spin'||state==='rolling'){
+    prevState=state;
+    state='paused';
+    meterActive=false;
+  }
 }
 function setMsg(t,cls){msgEl.textContent=t;msgEl.className=cls||'';}
 function updateHUD(){
@@ -180,8 +229,10 @@ function doThrow(){
   ball.spin=spinVal;
   state='rolling';
   meterActive=false;
+  hitSfxDone=false;
   setMsg('Rolling...','');
   shake=4;
+  sfx('throw');
 }
 
 function startMeter(){
@@ -218,6 +269,7 @@ function physicsStep(){
           p.vr=(Math.random()*2-1)*0.3;
           spawnBurst(p.x,p.y,'#e6edf3');
           shake=Math.max(shake,3);
+          if(!hitSfxDone){hitSfxDone=true;sfx('hit');}
         }
       }
     }
@@ -487,8 +539,8 @@ function endThrowClean(){
   }else{
     // frames 1-9
     if(rem===0){
-      if(knocked===10)setMsg('STRIKE!','strike');
-      else setMsg('SPARE!','spare');
+      if(knocked===10){setMsg('STRIKE!','strike');sfx('strike');}
+      else {setMsg('SPARE!','spare');sfx('spare');}
       frame++;ballInFrame=0;
       if(frame>=10){
         endGame();
@@ -516,6 +568,7 @@ function endGame(){
     try{localStorage.setItem('pixelBowlingBest',String(best));}catch(e){}
   }
   state='gameOver';
+  sfx('over');
   setMsg('Game over! Score: '+score+(score>=200?' — Amazing!':score>=150?' — Great!':score>=100?' — Nice!':''),'strike');
   updateHUD();
 }
@@ -587,23 +640,88 @@ function draw(){
   if(state==='aim'||state==='spin'){
     drawAimGuide();
   }
-  // game over overlay
-  if(state==='gameOver'){
-    ctx.fillStyle='rgba(13,17,23,0.7)';
+  // pause hint
+  if(state==='aim'||state==='spin'){
+    ctx.fillStyle='rgba(139,148,158,0.5)';
+    ctx.font='10px Courier New';
+    ctx.textAlign='right';
+    ctx.fillText('P = pause',W-14,20);
+  }
+  // start screen
+  if(state==='start'){
+    ctx.fillStyle='rgba(13,17,23,0.82)';
     ctx.fillRect(0,0,W,H);
-    ctx.fillStyle='#e3b341';
-    ctx.font='bold 36px Courier New';
     ctx.textAlign='center';
-    ctx.fillText('GAME OVER',W/2,H/2-40);
+    ctx.fillStyle='#e3b341';
+    ctx.font='bold 44px Courier New';
+    ctx.fillText('PIXEL BOWLING',W/2,H/2-120);
     ctx.fillStyle='#e6edf3';
-    ctx.font='20px Courier New';
-    ctx.fillText('Score: '+score,W/2,H/2);
+    ctx.font='16px Courier New';
+    ctx.fillText('Tap / Space to set aim, then again to throw.',W/2,H/2-70);
+    ctx.fillStyle='#8b949e';
+    ctx.font='13px Courier New';
+    ctx.fillText('Keys: Space = action, R = reset, P = pause',W/2,H/2-45);
+    if(best>0){
+      ctx.fillStyle='#58a6ff';
+      ctx.font='14px Courier New';
+      ctx.fillText('Best: '+best,W/2,H/2-15);
+    }
+    drawBigButton(W/2,H/2+70,'\u25B6  PLAY');
+  }
+  // pause overlay
+  if(state==='paused'){
+    ctx.fillStyle='rgba(13,17,23,0.75)';
+    ctx.fillRect(0,0,W,H);
+    ctx.textAlign='center';
+    ctx.fillStyle='#e6edf3';
+    ctx.font='bold 34px Courier New';
+    ctx.fillText('PAUSED',W/2,H/2-20);
     ctx.fillStyle='#8b949e';
     ctx.font='14px Courier New';
-    ctx.fillText('Best: '+best,W/2,H/2+30);
-    ctx.fillText('Press Reset to play again',W/2,H/2+60);
+    ctx.fillText('Tap or press P to resume',W/2,H/2+15);
+  }
+  // game over overlay
+  if(state==='gameOver'){
+    ctx.fillStyle='rgba(13,17,23,0.78)';
+    ctx.fillRect(0,0,W,H);
+    ctx.textAlign='center';
+    ctx.fillStyle='#e3b341';
+    ctx.font='bold 38px Courier New';
+    ctx.fillText('GAME OVER',W/2,H/2-90);
+    ctx.fillStyle='#e6edf3';
+    ctx.font='22px Courier New';
+    ctx.fillText('Score: '+score,W/2,H/2-35);
+    ctx.fillStyle='#8b949e';
+    ctx.font='15px Courier New';
+    ctx.fillText('Best: '+best,W/2,H/2);
+    if(score>=best&&score>0){
+      ctx.fillStyle='#3fb950';
+      ctx.font='bold 14px Courier New';
+      ctx.fillText('\u2605 NEW BEST \u2605',W/2,H/2+28);
+    }
+    drawBigButton(W/2,H/2+95,'\u25B6  PLAY AGAIN');
   }
   ctx.restore();
+}
+
+function drawBigButton(x,y,label){
+  const w=240,h=54;
+  ctx.fillStyle='#1f6feb';
+  ctx.strokeStyle='#388bfd';
+  ctx.lineWidth=2;
+  const r=10;
+  ctx.beginPath();
+  ctx.moveTo(x-w/2+r,y-h/2);
+  ctx.arcTo(x+w/2,y-h/2,x+w/2,y+h/2,r);
+  ctx.arcTo(x+w/2,y+h/2,x-w/2,y+h/2,r);
+  ctx.arcTo(x-w/2,y+h/2,x-w/2,y-h/2,r);
+  ctx.arcTo(x-w/2,y-h/2,x+w/2,y-h/2,r);
+  ctx.closePath();
+  ctx.fill();ctx.stroke();
+  ctx.fillStyle='#fff';
+  ctx.font='bold 20px Courier New';
+  ctx.textAlign='center';
+  ctx.fillText(label,x,y+7);
 }
 
 function drawPin(p){
@@ -698,6 +816,13 @@ function drawAimGuide(){
 }
 
 // --- Input ---
+function onPrimary(){
+  if(state==='start')startGame();
+  else if(state==='gameOver')startGame();
+  else if(state==='paused')togglePause();
+  else if(state==='aim')onAction();
+  else if(state==='spin')onThrow();
+}
 function onAction(){
   if(state==='aim'){
     state='spin';
@@ -727,26 +852,30 @@ document.getElementById('btnAim').addEventListener('click',onAction);
 document.getElementById('btnSpin').addEventListener('click',onAction);
 document.getElementById('btnThrow').addEventListener('click',onThrow);
 document.getElementById('btnReset').addEventListener('click',onReset);
+document.getElementById('btnPause').addEventListener('click',togglePause);
 
 // keyboard
 document.addEventListener('keydown',(e)=>{
   if(e.repeat)return;
   if(e.key===' '||e.key==='Enter'){
     e.preventDefault();
-    if(state==='aim')onAction();
-    else if(state==='spin')onThrow();
-    else if(state==='gameOver')onReset();
+    onPrimary();
   }else if(e.key==='r'||e.key==='R'){
     onReset();
+  }else if(e.key==='p'||e.key==='P'||e.key==='Escape'){
+    togglePause();
   }
 });
 
-// touch / click on canvas
+// touch / click on canvas (tap to act)
 cv.addEventListener('pointerdown',(e)=>{
   e.preventDefault();
-  if(state==='aim')onAction();
-  else if(state==='spin')onThrow();
-  else if(state==='gameOver')onReset();
+  onPrimary();
+});
+
+// auto-pause when tab hidden
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden)togglePause();
 });
 
 // --- Main loop ---
@@ -754,6 +883,11 @@ let last=0;
 function loop(t){
   const dt=Math.min((t-last)/1000,0.05);
   last=t;
+  if(state==='start'||state==='gameOver'||state==='paused'){
+    draw();
+    requestAnimationFrame(loop);
+    return;
+  }
   // meter
   if(meterActive){
     meterVal+=meterDir*METER_SPEED*dt;
@@ -785,7 +919,23 @@ function loop(t){
 }
 
 resetGame();
+state='start';
 requestAnimationFrame(loop);
+
+// --- Canvas letterbox scaling (DPR-aware) ---
+function fitCanvas(){
+  const availW=Math.min(window.innerWidth,760)-28;
+  const availH=window.innerHeight*0.72;
+  const scale=Math.max(0.35,Math.min(availW/W,availH/H));
+  const dpr=window.devicePixelRatio||1;
+  cv.style.width=(W*scale)+'px';
+  cv.style.height=(H*scale)+'px';
+  cv.width=Math.round(W*dpr);
+  cv.height=Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize',fitCanvas);
+fitCanvas();
 })();
 </script>
 </body>
